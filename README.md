@@ -3,28 +3,43 @@ Ollama-Firefox-DuckDuckGo based internet search tool to make finding stuff easie
 
 # Basic requirements
 You need to have a GPU that can handle the Meta Ollama phi4 language model
+
 You need a basic modern python environment
+
 You need Firefox installed
+
 This has only been tested on Linux, I assume it will work on Mac so long as you have Firefox. I imagine it can be made to work with Windows... I only test on Linux but your LLM of choice can probably help you with other platforms!
 
 # Installation instructions
 1. Install Phi4
+
    $ curl -fsSL https://ollama.com/install.sh | sh # This will download and install the latestest version of ollama from Meta
+
    $ ollama run phi4 # This will download and start the phi4 model. This is a good test
+
    $ ollama pull phi4 # This is an optional alternative to the previous command (useful if you already have other models downloaded)
+
    Phi4 is about a 10 Gb download so maybe start on step 2 in parallel...
-2. Download anaconda (https://www.anaconda.com/download)
+3. Download anaconda (https://www.anaconda.com/download)
+
    Once anaconda is downloaded and installed, create a conda environment and install the base dependencies
+
    $ conda create -n agent
+
    $ conda activate agent
+
    $ conda install selenium httpx tenacity -y
-3. If you don't have firefox installed because you are running a special Linux then install it from your package manager
+5. If you don't have firefox installed because you are running a special Linux then install it from your package manager
+
    $ sudo apt update
+
    $ sudo apt install firefox
 
 # Running agent-based web searches
 1. Start the agent from a terminal
+
    conda activate agent
+
    python learning-agent.py
 
 --------------- It should look something like this ---------------
@@ -87,34 +102,49 @@ Certainly! Here's a comprehensive guide to making traditional, creamy, and delic
 This recipe combines traditional methods with tips for achieving a creamy, restaurant-style hummus that's perfect for snacking or serving at gatherings. Enjoy your homemade hummus!
 
 References:
+
 [1] Best Hummus Recipe (Plus Tips & Variations) - Cookie and Kate
     https://cookieandkate.com/best-hummus-recipe/
+    
 [2] The BEST Hummus Recipe {Easy & Authentic} - Feel Good Foodie
     https://feelgoodfoodie.net/recipe/best-hummus/
+    
 [3] The Best Easy Hummus Recipe • It Doesn't Taste Like Chicken
     https://itdoesnttastelikechicken.com/the-best-easy-hummus-recipe/
+    
 [4] Authentic Hummus Recipe - The Kitchen Girl
     https://thekitchengirl.com/hummus-recipe/
+    
 [5] Best Homemade Hummus (3 Ways!) - The Spice Girl Kitchen
     https://thespicegirlkitchen.com/best-homemade-hummus/
+    
 [6] Homemade Hummus in 10 Easy Steps: The Secret Recipe You've Been ...
     https://flavorinsider.com/44764/how-to-make-home-hummus/
+    
 [7] How to Make Hummus - Sugar Spun Run
     https://sugarspunrun.com/how-to-make-hummus/
+    
 [8] Authentic Homemade Hummus (Quick and Easy Recipe)
     https://www.lemonblossoms.com/blog/authentic-hummus-recipe/
+    
 [9] Authentic Hummus Recipe - The Kitchen Girl
     https://thekitchengirl.com/hummus-recipe/
+    
 [10] The Best Easy Hummus Recipe - It Doesn't Taste Like Chicken
     https://itdoesnttastelikechicken.com/the-best-easy-hummus-recipe/
+    
 [11] The BEST Hummus Recipe {Easy & Authentic} - Feel Good Foodie
     https://feelgoodfoodie.net/recipe/best-hummus/
+    
 [12] Authentic Hummus Recipe - The Kitchen Girl
     https://thekitchengirl.com/hummus-recipe/
+    
 [13] Easy Hummus Recipe (Authentic and Homemade) - The Mediterranean Dish
     https://www.themediterraneandish.com/how-to-make-hummus/
+    
 [14] Hummus Recipe (The Traditional Tasty Way) - Chef Tariq
     https://www.cheftariq.com/recipe/hummus/
+    
 [15] Traditional Hummus Recipe: How to Make the Best Hummus Ever!
     https://www.growforagecookferment.com/traditional-hummus-recipe/
 
@@ -122,4 +152,5 @@ Your question:
 -----------------------------
 2. Stop the agent at the end by typing "quit" in the question prompt
 3. Deactivate the conda environment
+
    $ conda deactivate
