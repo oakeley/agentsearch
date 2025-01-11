@@ -1,10 +1,17 @@
 import logging
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
 from dataclasses import dataclass
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 import json
 import time
 import re
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import httpx
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -12,13 +19,9 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import WebDriverException, TimeoutException
 from tenacity import retry, stop_after_attempt, wait_exponential
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+from bs4 import BeautifulSoup
+import threading
+import asyncio
 
 @dataclass
 class Task:
@@ -47,7 +50,6 @@ class SearchResult:
         """Clean and normalize text content"""
         if not text:
             return ""
-        # Remove extra whitespace and normalize quotes
         text = re.sub(r'\s+', ' ', text.strip())
         text = text.replace('"', '"').replace('"', '"')
         return text
@@ -56,9 +58,7 @@ class SearchResult:
         """Clean and validate URLs"""
         if not url:
             return ""
-        # Remove tracking parameters and clean URL
         url = url.split('?')[0]
-        # Remove common tracking endpoints
         url = re.sub(r'/amp$', '', url)
         return url.strip()
 
@@ -82,35 +82,40 @@ class SearchResult:
 class DuckDuckGoSearch:
     """Handles web searches using DuckDuckGo with improved reliability"""
     def __init__(self, max_retries: int = 3):
-        self.driver = None
         self.max_retries = max_retries
+        self.lock = threading.Lock()
+        self._init_connection_pool()
+
+    def _init_connection_pool(self):
+        """Initialize connection pool settings"""
+        import urllib3
+        urllib3.PoolManager(maxsize=10, retries=urllib3.Retry(3))
+        # Set Firefox capabilities for better connection handling
+        self.firefox_capabilities = webdriver.FirefoxOptions()
+        self.firefox_capabilities.add_argument('--headless')
+        self.firefox_capabilities.add_argument('--disable-gpu')
+        self.firefox_capabilities.add_argument('--no-sandbox')
+        self.firefox_capabilities.add_argument('--disable-dev-shm-usage')
+        self.firefox_capabilities.add_argument('--disable-notifications')
+        self.firefox_capabilities.add_argument('--disable-popup-blocking')
+        self.firefox_capabilities.set_preference("browser.download.folderList", 2)
+        self.firefox_capabilities.set_preference("browser.helperApps.neverAsk.saveToDisk", "application/pdf")
+        # Add connection pooling settings
+        self.firefox_capabilities.set_preference("network.http.connection-timeout", 10)
+        self.firefox_capabilities.set_preference("network.http.max-connections", 10)
+        self.firefox_capabilities.set_preference("network.http.max-persistent-connections-per-server", 5)
 
     def initialize_browser(self):
         """Initialize browser with improved error handling"""
-        if self.driver:
+        with self.lock:
             try:
-                self.driver.quit()
-            except:
-                pass
-            self.driver = None
-
-        options = webdriver.FirefoxOptions()
-        options.add_argument('--headless')
-        options.add_argument('--disable-gpu')
-        options.add_argument('--no-sandbox')
-        options.add_argument('--disable-dev-shm-usage')
-        options.add_argument('--disable-notifications')
-        options.add_argument('--disable-popup-blocking')
-        options.set_preference("browser.download.folderList", 2)
-        options.set_preference("browser.helperApps.neverAsk.saveToDisk", "application/pdf")
-        
-        try:
-            self.driver = webdriver.Firefox(options=options)
-            self.driver.set_page_load_timeout(20)
-            self.driver.implicitly_wait(5)
-        except WebDriverException as e:
-            logger.error(f"Failed to initialize Firefox: {e}")
-            raise
+                driver = webdriver.Firefox(options=self.firefox_capabilities)
+                driver.set_page_load_timeout(20)
+                driver.implicitly_wait(5)
+                return driver
+            except WebDriverException as e:
+                logger.error(f"Failed to initialize Firefox: {e}")
+                raise
 
     @retry(
         stop=stop_after_attempt(3),
@@ -118,41 +123,41 @@ class DuckDuckGoSearch:
     )
     def search(self, query: str) -> List[SearchResult]:
         """Perform search with retry logic and improved parsing"""
+        driver = None
         try:
-            if not self.driver:
-                self.initialize_browser()
+            driver = self.initialize_browser()
 
             # Clean and encode query for URL
-            query = re.sub(r'[^\w\s-]', '', query.strip())  # Remove special chars
+            query = re.sub(r'[^\w\s-]', '', query.strip())
             query = re.sub(r'\s+', ' ', query).strip()
             encoded_query = '+'.join(query.split())
             url = f"https://duckduckgo.com/?q={encoded_query}&kl=us-en&k1=-1&atb=v233-1&ia=web"
             
             logger.info(f"Searching DuckDuckGo: {url}")
-            self.driver.get(url)
+            driver.get(url)
             
-            # Wait for results with better error handling and specific selectors
+            # Wait for results with better error handling
             try:
-                WebDriverWait(self.driver, 10).until(
+                WebDriverWait(driver, 10).until(
                     EC.presence_of_element_located((By.CSS_SELECTOR, 'article[data-testid="result"]'))
                 )
-                # Add a small delay to ensure dynamic content loads
                 time.sleep(2)
             except TimeoutException:
                 logger.warning("Timeout waiting for search results, retrying...")
-                self.driver.refresh()
-                WebDriverWait(self.driver, 10).until(
+                driver.refresh()
+                WebDriverWait(driver, 10).until(
                     EC.presence_of_element_located((By.CSS_SELECTOR, 'article[data-testid="result"]'))
                 )
                 time.sleep(2)
 
-            # Improved JavaScript for result extraction with new selectors
+            # JavaScript for result extraction
             js_script = """
             function getResults() {
                 const results = [];
                 const articles = document.querySelectorAll('article[data-testid="result"]');
+                const maxResults = Math.min(articles.length, 8);
                 
-                for (let i = 0; i < Math.min(articles.length, 8); i++) {
+                for (let i = 0; i < maxResults; i++) {
                     try {
                         const article = articles[i];
                         const titleElem = article.querySelector('h2 a');
@@ -161,7 +166,6 @@ class DuckDuckGoSearch:
                         
                         if (titleElem && snippetElem && urlElem) {
                             const url = urlElem.href;
-                            // Skip if it's a DuckDuckGo internal link
                             if (!url.includes('duckduckgo.com')) {
                                 results.push({
                                     title: titleElem.textContent.trim(),
@@ -179,7 +183,7 @@ class DuckDuckGoSearch:
             return getResults();
             """
             
-            raw_results = self.driver.execute_script(js_script)
+            raw_results = driver.execute_script(js_script)
             
             # Process and validate results
             results = []
@@ -199,12 +203,11 @@ class DuckDuckGoSearch:
             raise
             
         finally:
-            if self.driver:
+            if driver:
                 try:
-                    self.driver.quit()
+                    driver.quit()
                 except:
                     pass
-                self.driver = None
 
 class OllamaLLM:
     """Handles interactions with the Ollama phi4 model with improved prompting"""
@@ -244,11 +247,101 @@ class OllamaLLM:
             logger.error(f"Error generating response from Ollama: {e}")
             raise
 
-class LearningAgent:
-    """Main learning agent class with improved coordination and error handling"""
+@dataclass
+class ExtractedContent:
+    """Represents content extracted from a webpage"""
+    url: str
+    title: str
+    raw_text: str
+    relevant_snippets: List[str] = None
+
+    def __post_init__(self):
+        if self.relevant_snippets is None:
+            self.relevant_snippets = []
+
+class WebContentExtractor:
+    """Handles webpage content extraction with proper cleanup"""
+    def __init__(self):
+        self.lock = threading.Lock()
+        self._init_connection_pool()
+
+    def _init_connection_pool(self):
+        """Initialize connection pool settings"""
+        import urllib3
+        urllib3.PoolManager(maxsize=10, retries=urllib3.Retry(3))
+        # Set Firefox capabilities for better connection handling
+        self.firefox_capabilities = webdriver.FirefoxOptions()
+        self.firefox_capabilities.add_argument('--headless')
+        self.firefox_capabilities.add_argument('--disable-gpu')
+        self.firefox_capabilities.add_argument('--no-sandbox')
+        self.firefox_capabilities.add_argument('--disable-dev-shm-usage')
+        self.firefox_capabilities.add_argument('--disable-javascript')
+        self.firefox_capabilities.set_preference("permissions.default.stylesheet", 2)
+        self.firefox_capabilities.set_preference("permissions.default.image", 2)
+        # Add connection pooling settings
+        self.firefox_capabilities.set_preference("network.http.connection-timeout", 10)
+        self.firefox_capabilities.set_preference("network.http.max-connections", 10)
+        self.firefox_capabilities.set_preference("network.http.max-persistent-connections-per-server", 5)
+
+    def initialize_browser(self):
+        """Initialize a new browser instance with proper configuration"""
+        with self.lock:
+            try:
+                driver = webdriver.Firefox(options=self.firefox_capabilities)
+                driver.set_page_load_timeout(15)
+                driver.implicitly_wait(5)
+                return driver
+            except WebDriverException as e:
+                logger.error(f"Failed to initialize Firefox: {e}")
+                raise
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=6))
+    def extract_content(self, url: str) -> Optional[str]:
+        """Extract and clean webpage content with improved connection handling"""
+        driver = None
+        try:
+            driver = self.initialize_browser()
+            driver.get(url)
+            
+            # Wait for content to load with more specific conditions
+            WebDriverWait(driver, 20).until(
+                EC.presence_of_all_elements_located((By.CSS_SELECTOR, "body, p, article"))
+            )
+            # Add a small delay to ensure dynamic content loads
+            time.sleep(2)
+
+            # Get page source and parse with BeautifulSoup
+            soup = BeautifulSoup(driver.page_source, 'html.parser')
+            
+            # Remove unwanted elements
+            for element in soup.find_all(['script', 'style', 'nav', 'footer', 'iframe']):
+                element.decompose()
+
+            # Extract text content
+            text_content = ' '.join([p.get_text().strip() for p in soup.find_all(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'])])
+            
+            # Clean up text
+            text_content = re.sub(r'\s+', ' ', text_content)
+            text_content = re.sub(r'[^\w\s.,!?-]', '', text_content)
+            
+            return text_content.strip()
+
+        except Exception as e:
+            logger.error(f"Error extracting content from {url}: {e}")
+            return None
+        finally:
+            if driver:
+                try:
+                    driver.quit()
+                except:
+                    pass
+
+class EnhancedLearningAgent:
+    """Enhanced learning agent with content extraction capability"""
     def __init__(self):
         self.llm = OllamaLLM()
         self.search_engine = DuckDuckGoSearch()
+        self.content_extractor = WebContentExtractor()
 
     async def generate_search_queries(self, question: str) -> List[str]:
         """Generate multiple optimized search queries to cover different aspects of the question"""
@@ -256,7 +349,7 @@ class LearningAgent:
         Break down this question into 2-3 focused search queries. Each query should:
         - Target a specific aspect of the question
         - Use 3-5 key terms only
-        - Include the current year
+        - Focus on authoritative historical sources
         - Avoid quotes or special characters
         
         Question: {question}
@@ -273,174 +366,105 @@ class LearningAgent:
             logger.error(f"Query generation failed: {e}")
             return [question]  # Fallback to original question
 
+    async def process_url(self, search_result: SearchResult, question: str) -> Optional[ExtractedContent]:
+        """Process a single URL with content extraction"""
+        try:
+            raw_text = self.content_extractor.extract_content(search_result.url)
+            if not raw_text:
+                return None
+
+            # Use existing LLM to analyze relevance
+            analysis_prompt = f"""
+            Analyze this text content and extract ONLY the parts that are directly relevant to answering this question:
+            Question: {question}
+            Content: {raw_text[:2000]}  # Limit content length
+            
+            Return only the relevant text snippets, separated by newlines.
+            """
+            
+            relevant_text = await self.llm.generate(analysis_prompt)
+            relevant_snippets = [s.strip() for s in relevant_text.split('\n') if s.strip()]
+
+            return ExtractedContent(
+                url=search_result.url,
+                title=search_result.title,
+                raw_text=raw_text,
+                relevant_snippets=relevant_snippets
+            )
+
+        except Exception as e:
+            logger.error(f"Error processing URL {search_result.url}: {e}")
+            return None
+
     async def process_user_input(self, user_input: str) -> Dict:
         """Process user input with iterative searches and enhanced result synthesis"""
-        task = Task(
-            id=str(time.time()),
-            description=user_input
-        )
-        
         try:
-            logger.info(f"Processing query: {task.description}")
-            
-            # Generate multiple search queries
-            search_queries = await self.generate_search_queries(task.description)
+            # Generate search queries using original method
+            search_queries = await self.generate_search_queries(user_input)
             
             all_results = []
             for query in search_queries:
-                logger.info(f"Executing search for query: {query}")
-                # Perform search with timeout
+                # Use original search method
                 with ThreadPoolExecutor() as executor:
                     future = executor.submit(self.search_engine.search, query)
                     search_results = future.result(timeout=30)
                     if search_results:
                         all_results.extend(search_results)
-                        logger.info(f"Found {len(search_results)} results for query: {query}")
-            
-            # Remove duplicates based on URL
-            seen_urls = set()
-            unique_results = []
-            for result in all_results:
-                if result.url not in seen_urls:
-                    seen_urls.add(result.url)
-                    unique_results.append(result)
-            
-            if not unique_results:
-                return {
-                    "status": "no_results",
-                    "result": "I couldn't find reliable information for your question. Could you please rephrase it or provide more context?",
-                    "context": None
-                }
-
-            logger.info(f"Total unique results found: {len(unique_results)}")
-
-            # Generate comprehensive response using all gathered information
-            prompt = f"""
-            Question: {task.description}
-
-            Using these combined sources, provide a comprehensive answer that:
-            1. Addresses all aspects of the question
-            2. Uses [n] citations for facts and claims
-            3. Synthesizes information from multiple sources when relevant
-            4. Maintains natural, flowing language
-            5. Organizes information logically
-            6. Includes specific details, numbers, and dates when available
-            7. Ensures each major claim has proper citation
-            
-            Sources:
-            """
-            
-            for i, result in enumerate(unique_results, 1):
-                prompt += f"\n[{i}] {result.title}"
-                prompt += f"\nURL: {result.url}"
-                prompt += f"\nContent: {result.snippet}\n"
-            
-            response = await self.llm.generate(prompt)
-            
-            # Format the result
-            result = {
-                "status": "completed",
-                "result": response,
-                "context": [r.to_dict() for r in unique_results]
-            }
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"Error processing input: {e}")
-            return {
-                "status": "error",
-                "result": f"An error occurred while processing your question. Please try again.",
-                "context": None
-            }
-
-    async def optimize_query(self, question: str) -> str:
-        """Use LLM to optimize the search query with improved prompting"""
-        prompt = f"""
-        Transform this question into a simple search query to find accurate, recent information.
-        Guidelines:
-        - Use 3-5 key terms only
-        - Include the year for time-sensitive info
-        - NO quotes, commas, or special characters
-        - Keep it simple and direct
-        
-        Question: {question}
-        
-        Return ONLY the optimized search terms, no punctuation or explanations.
-        """
-        
-        try:
-            optimized = await self.llm.generate(prompt)
-            # Clean up the query - remove quotes, commas and excessive spaces
-            optimized = re.sub(r'["\',]', '', optimized.strip())
-            optimized = re.sub(r'\s+', ' ', optimized)
-            
-            logger.info(f"Original query: {question}")
-            logger.info(f"Optimized query: {optimized}")
-            
-            return optimized
-        except Exception as e:
-            logger.error(f"Query optimization failed: {e}")
-            return question
-
-    async def process_user_input(self, user_input: str) -> Dict:
-        """Process user input with iterative searches and enhanced result synthesis"""
-        task = Task(
-            id=str(time.time()),
-            description=user_input
-        )
-        
-        try:
-            # Generate multiple search queries
-            search_queries = await self.generate_search_queries(task.description)
-            logger.info(f"Generated queries: {search_queries}")
-            
-            all_results = []
-            for query in search_queries:
-                # Perform search with timeout
-                with ThreadPoolExecutor() as executor:
-                    future = executor.submit(self.search_engine.search, query)
-                    search_results = future.result(timeout=30)
-                    all_results.extend(search_results)
             
             if not all_results:
                 return {
                     "status": "no_results",
-                    "result": "I couldn't find reliable information for your question. Could you please rephrase it or provide more context?",
+                    "result": "I couldn't find reliable information for your question.",
                     "context": None
                 }
 
-            # Generate comprehensive response using all gathered information
-            prompt = f"""
-            Question: {task.description}
+            # Process URLs in parallel
+            extracted_contents = []
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                futures = []
+                for result in all_results[:5]:  # Limit to top 5 results
+                    future = executor.submit(
+                        lambda r=result: asyncio.run(self.process_url(r, user_input))
+                    )
+                    futures.append(future)
 
-            Using these combined sources, provide a comprehensive answer that:
-            1. Addresses all aspects of the question
-            2. Uses [n] citations for facts and claims
-            3. Synthesizes information from multiple sources when relevant
-            4. Maintains natural, flowing language
-            5. Organizes information logically
-            6. Includes specific details, numbers, and dates when available
-            7. Ensures each major claim has proper citation
+                for future in as_completed(futures):
+                    content = future.result()
+                    if content and content.relevant_snippets:
+                        extracted_contents.append(content)
+
+            # Generate final response using extracted content
+            synthesis_prompt = f"""
+            Question: {user_input}
+
+            Using these verified sources, provide a precise answer that:
+            1. Directly addresses all aspects of the question
+            2. Uses only the provided content
+            3. Cites sources with [n] format
+            4. Maintains factual accuracy
             
             Sources:
             """
-            
-            for i, result in enumerate(all_results, 1):
-                prompt += f"\n[{i}] {result.title}"
-                prompt += f"\nURL: {result.url}"
-                prompt += f"\nContent: {result.snippet}\n"
-            
-            response = await self.llm.generate(prompt)
-            
-            # Format the result
-            result = {
+
+            for i, content in enumerate(extracted_contents, 1):
+                synthesis_prompt += f"\n[{i}] URL: {content.url}\n"
+                for snippet in content.relevant_snippets:
+                    synthesis_prompt += f"Snippet: {snippet}\n"
+
+            response = await self.llm.generate(synthesis_prompt)
+
+            return {
                 "status": "completed",
                 "result": response,
-                "context": [r.to_dict() for r in all_results]
+                "context": [
+                    {
+                        "url": content.url,
+                        "title": content.title,
+                        "snippets": content.relevant_snippets
+                    }
+                    for content in extracted_contents
+                ]
             }
-            
-            return result
             
         except Exception as e:
             logger.error(f"Error processing input: {e}")
@@ -463,16 +487,16 @@ def format_response(result: Dict) -> str:
         output.append("No Results:")
     
     # Add the main response
-    if result["result"]:
+    if result.get("result"):
         output.append(result["result"])
     
     # Add formatted references
-    if result["context"]:
+    if result.get("context"):
         output.append("\nReferences:")
         for i, source in enumerate(result["context"], 1):
             # Clean up title and URL for display
-            title = re.sub(r'\s+', ' ', source['title'])
-            url = source['url'].split('?')[0]  # Remove query parameters
+            title = re.sub(r'\s+', ' ', source.get('title', 'No Title'))
+            url = source.get('url', '').split('?')[0]  # Remove query parameters
             
             output.append(f"[{i}] {title}")
             output.append(f"    {url}")
@@ -480,9 +504,9 @@ def format_response(result: Dict) -> str:
     return "\n".join(output)
 
 async def main():
-    """Main interaction loop with improved error handling"""
-    print("\nLearning Agent initialized. Enter your question (or 'quit' to exit):")
-    agent = LearningAgent()
+    """Main interaction loop with enhanced agent"""
+    print("\nEnhanced Learning Agent initialized. Enter your question (or 'quit' to exit):")
+    agent = EnhancedLearningAgent()
     
     while True:
         try:
@@ -505,5 +529,4 @@ async def main():
             continue
 
 if __name__ == "__main__":
-    import asyncio
     asyncio.run(main())
